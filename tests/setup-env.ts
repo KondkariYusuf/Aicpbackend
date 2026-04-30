@@ -1,0 +1,9 @@
+process.env.NODE_ENV = "test";
+process.env.PORT = "8080";
+process.env.LOG_LEVEL = "error";
+process.env.SUPABASE_URL = "https://example.supabase.co";
+process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key-with-minimum-length";
+process.env.SUPABASE_PUBLISHABLE_DEFAULT_KEY = "test-publishable-key-with-minimum-length";
+process.env.SUPABASE_STORAGE_BUCKET = "compliance-docs";
+process.env.REDIS_URL = "redis://127.0.0.1:6379";
+process.env.WEBHOOK_SHARED_SECRET = "test-webhook-secret-12345";

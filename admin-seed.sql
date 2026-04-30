@@ -1,0 +1,30 @@
+-- ==========================================
+-- AICP ADMIN SEED SCRIPT
+-- ==========================================
+-- ⚠️  This script CANNOT be run directly in the SQL editor to create an auth user
+-- with a password. Supabase auth.users requires password hashing via the Auth API.
+--
+-- OPTION A (Recommended): Run the Node.js seed script below
+-- OPTION B: Use the Supabase Dashboard > Authentication > Users > Add User
+--
+-- After creating the auth user via Option A or B, run only the public.users INSERT below.
+-- ==========================================
+
+-- ==========================================
+-- Node.js Seed Script (run once via: npx tsx backend/seed-admin.ts)
+-- ==========================================
+-- See: backend/seed-admin.ts
+
+-- ==========================================
+-- If auth user already created via Dashboard/API, insert the profile:
+-- ==========================================
+-- Replace '<AUTH_USER_UUID>' with the UUID returned by Supabase when creating the auth user.
+--
+-- INSERT INTO public.users (id, institute_id, full_name, role, phone)
+-- VALUES (
+--     '<AUTH_USER_UUID>',
+--     NULL,
+--     'Super Admin',
+--     'Admin',
+--     NULL
+-- );

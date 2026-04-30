@@ -1,0 +1,11 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.documentsRoutes = void 0;
+const express_1 = require("express");
+const auth_1 = require("../../core/middleware/auth");
+const rbac_1 = require("../../core/middleware/rbac");
+const async_handler_1 = require("../../core/utils/async-handler");
+const documents_controller_1 = require("./documents.controller");
+const router = (0, express_1.Router)();
+exports.documentsRoutes = router;
+router.post("/generate-upload-url", auth_1.authenticate, (0, rbac_1.authorizeRoles)("Clerk"), (0, async_handler_1.asyncHandler)(documents_controller_1.documentsController.generateUploadUrl));
