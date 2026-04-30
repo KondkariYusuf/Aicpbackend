@@ -4,6 +4,7 @@ exports.approvalsController = void 0;
 const approvals_schemas_1 = require("./approvals.schemas");
 const approvals_service_1 = require("./approvals.service");
 const queues_1 = require("../../jobs/queues");
+const logger_1 = require("../../core/utils/logger");
 exports.approvalsController = {
     submit: async (req, res) => {
         const payload = approvals_schemas_1.submitApprovalSchema.parse(req.body);
@@ -11,7 +12,7 @@ exports.approvalsController = {
         const reviewerRole = req.auth.profile.role;
         const reviewerName = req.auth.profile.full_name;
         const approval = await approvals_service_1.approvalsService.submit(payload, reviewerId, reviewerRole);
-        // Dispatch workflow notification
+        // Dispatch workflow notification (non-blocking)
         const docInfo = await approvals_service_1.approvalsService.getDocumentInfo(payload.documentId);
         if (docInfo) {
             let event;
@@ -22,18 +23,23 @@ exports.approvalsController = {
                 event = "principal_decision";
             }
             else {
-                event = "hod_feedback"; // fallback
+                event = "hod_feedback";
             }
-            await queues_1.workflowNotificationQueue.add("workflow-notification", {
-                event,
-                documentId: docInfo.id,
-                documentName: docInfo.document_name,
-                instituteId: docInfo.institute_id,
-                actorName: reviewerName,
-                actorRole: reviewerRole,
-                feedback: payload.feedback,
-                decision: payload.action === "approve" ? "approved" : payload.action === "reject" ? "rejected" : undefined
-            });
+            try {
+                await queues_1.workflowNotificationQueue.add("workflow-notification", {
+                    event,
+                    documentId: docInfo.id,
+                    documentName: docInfo.document_name,
+                    instituteId: docInfo.institute_id,
+                    actorName: reviewerName,
+                    actorRole: reviewerRole,
+                    feedback: payload.feedback,
+                    decision: payload.action === "approve" ? "approved" : payload.action === "reject" ? "rejected" : undefined
+                });
+            }
+            catch (err) {
+                logger_1.logger.warn({ error: err instanceof Error ? err.message : "Unknown" }, "Failed to queue workflow notification (Redis may be down)");
+            }
         }
         res.status(201).json({
             success: true,

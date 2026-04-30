@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.createWorkflowNotificationWorker = void 0;
+exports.createWorkflowNotificationWorker = exports.processWorkflowNotification = void 0;
 const bullmq_1 = require("bullmq");
 const redis_1 = require("../../config/redis");
 const supabase_1 = require("../../config/supabase");
@@ -93,84 +93,96 @@ const buildEmailHtml = (title, message, documentName) => {
     </div>
   `;
 };
+const processWorkflowNotification = async (data) => {
+    const { event, documentId, documentName, instituteId, actorName, actorRole, feedback, decision } = data;
+    logger_1.logger.info({ event, documentName, actorName, actorRole }, "Processing workflow notification");
+    let recipients = [];
+    let title;
+    let message;
+    let notificationType;
+    switch (event) {
+        case "document_uploaded": {
+            recipients = await fetchUsersByRole(instituteId, ["HOD", "Principal"]);
+            title = "New Document Uploaded";
+            message = `${actorName} (${actorRole}) has uploaded "${documentName}" for review.`;
+            notificationType = "upload";
+            break;
+        }
+        case "renewal_uploaded": {
+            recipients = await fetchUsersByRole(instituteId, ["HOD", "Principal"]);
+            title = "Document Renewal Submitted";
+            message = `${actorName} (${actorRole}) has submitted a renewal for "${documentName}". It is awaiting your review.`;
+            notificationType = "renewal";
+            break;
+        }
+        case "document_expiring": {
+            recipients = await fetchUsersByRole(instituteId, ["HOD", "Principal"]);
+            const milestoneDays = data.milestoneDays ?? 0;
+            title = "Action Required: Document Expiring";
+            message = `"${documentName}" is expiring in ${milestoneDays} days (or is already expired). Please take action to renew it.`;
+            notificationType = "expiry_warning";
+            break;
+        }
+        case "hod_feedback": {
+            const uploader = await fetchUploader(documentId);
+            const principals = await fetchUsersByRole(instituteId, ["Principal"]);
+            if (uploader) {
+                recipients.push(uploader);
+            }
+            recipients.push(...principals);
+            title = "HOD Feedback Submitted";
+            message = `${actorName} (HOD) has submitted feedback on "${documentName}": "${feedback ?? "(no comment)"}"`;
+            notificationType = "feedback";
+            break;
+        }
+        case "principal_decision": {
+            const uploaderForDecision = await fetchUploader(documentId);
+            const hods = await fetchUsersByRole(instituteId, ["HOD"]);
+            if (uploaderForDecision) {
+                recipients.push(uploaderForDecision);
+            }
+            recipients.push(...hods);
+            const decisionLabel = decision === "approved" ? "APPROVED ✅" : "REJECTED ❌";
+            title = `Document ${decisionLabel}`;
+            message = `${actorName} (Principal) has ${decision} "${documentName}". Feedback: "${feedback ?? "(no comment)"}"`;
+            notificationType = "decision";
+            break;
+        }
+        default:
+            logger_1.logger.warn({ event }, "Unknown workflow notification event");
+            return { sent: false };
+    }
+    const uniqueRecipients = Array.from(new Map(recipients.map((r) => [r.id, r])).values());
+    let notificationsInserted = 0;
+    let emailsSent = 0;
+    for (const recipient of uniqueRecipients) {
+        await insertNotification(recipient.id, title, message, notificationType);
+        notificationsInserted++;
+        const email = await fetchUserEmail(recipient.id);
+        if (email) {
+            try {
+                const html = buildEmailHtml(title, message, documentName);
+                await (0, email_service_1.sendWorkflowEmail)(email, `[AICP] ${title}`, html);
+                emailsSent++;
+            }
+            catch {
+                logger_1.logger.warn({ recipientId: recipient.id }, "Email send failed, in-app notification saved");
+            }
+        }
+    }
+    logger_1.logger.info({
+        event,
+        recipientCount: uniqueRecipients.length,
+        notificationsInserted,
+        emailsSent
+    }, "Workflow notification processed");
+    return { sent: true, notificationsInserted, emailsSent };
+};
+exports.processWorkflowNotification = processWorkflowNotification;
 const createWorkflowNotificationWorker = () => {
     const worker = new bullmq_1.Worker(queue_names_1.QUEUE_NAMES.WORKFLOW_NOTIFICATION, async (job) => {
-        const { event, documentId, documentName, instituteId, actorName, actorRole, feedback, decision } = job.data;
-        logger_1.logger.info({ jobId: job.id, event, documentName, actorName, actorRole }, "Processing workflow notification");
-        let recipients = [];
-        let title;
-        let message;
-        let notificationType;
-        switch (event) {
-            case "document_uploaded": {
-                // Clerk uploads → Notify HOD & Principal
-                recipients = await fetchUsersByRole(instituteId, ["HOD", "Principal"]);
-                title = "New Document Uploaded";
-                message = `${actorName} (${actorRole}) has uploaded "${documentName}" for review.`;
-                notificationType = "upload";
-                break;
-            }
-            case "hod_feedback": {
-                // HOD gives feedback → Notify Clerk (uploader) & Principal
-                const uploader = await fetchUploader(documentId);
-                const principals = await fetchUsersByRole(instituteId, ["Principal"]);
-                if (uploader) {
-                    recipients.push(uploader);
-                }
-                recipients.push(...principals);
-                title = "HOD Feedback Submitted";
-                message = `${actorName} (HOD) has submitted feedback on "${documentName}": "${feedback ?? "(no comment)"}"`;
-                notificationType = "feedback";
-                break;
-            }
-            case "principal_decision": {
-                // Principal approves/rejects → Notify Clerk (uploader) & HOD
-                const uploaderForDecision = await fetchUploader(documentId);
-                const hods = await fetchUsersByRole(instituteId, ["HOD"]);
-                if (uploaderForDecision) {
-                    recipients.push(uploaderForDecision);
-                }
-                recipients.push(...hods);
-                const decisionLabel = decision === "approved" ? "APPROVED ✅" : "REJECTED ❌";
-                title = `Document ${decisionLabel}`;
-                message = `${actorName} (Principal) has ${decision} "${documentName}". Feedback: "${feedback ?? "(no comment)"}"`;
-                notificationType = "decision";
-                break;
-            }
-            default:
-                logger_1.logger.warn({ event }, "Unknown workflow notification event");
-                return { sent: false };
-        }
-        // Deduplicate recipients by id
-        const uniqueRecipients = Array.from(new Map(recipients.map((r) => [r.id, r])).values());
-        let notificationsInserted = 0;
-        let emailsSent = 0;
-        for (const recipient of uniqueRecipients) {
-            // 1. Insert in-app notification
-            await insertNotification(recipient.id, title, message, notificationType);
-            notificationsInserted++;
-            // 2. Send email
-            const email = await fetchUserEmail(recipient.id);
-            if (email) {
-                try {
-                    const html = buildEmailHtml(title, message, documentName);
-                    await (0, email_service_1.sendWorkflowEmail)(email, `[AICP] ${title}`, html);
-                    emailsSent++;
-                }
-                catch {
-                    // Email failure is non-fatal — the in-app notification was already saved
-                    logger_1.logger.warn({ recipientId: recipient.id }, "Email send failed, in-app notification saved");
-                }
-            }
-        }
-        logger_1.logger.info({
-            jobId: job.id,
-            event,
-            recipientCount: uniqueRecipients.length,
-            notificationsInserted,
-            emailsSent
-        }, "Workflow notification processed");
-        return { sent: true, notificationsInserted, emailsSent };
+        const result = await (0, exports.processWorkflowNotification)(job.data);
+        return result;
     }, {
         connection: (0, redis_1.createRedisConnection)(),
         concurrency: 5

@@ -1,9 +1,41 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.runDailyExpiryCheck = void 0;
 const supabase_1 = require("../../config/supabase");
 const logger_1 = require("../../core/utils/logger");
-const queues_1 = require("../queues");
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 /**
  * Returns the start of the current UTC day (midnight) to ensure
@@ -22,27 +54,33 @@ const getDaysUntilExpiry = (expiryDateIso, now) => {
     return Math.floor((expiry - today) / MS_PER_DAY);
 };
 const calculateStatus = (daysUntilExpiry) => {
-    if (daysUntilExpiry < 0) {
+    if (daysUntilExpiry <= 0) {
         return "Expired";
     }
-    if (daysUntilExpiry <= 90) {
+    if (daysUntilExpiry < 30) {
+        return "Near Expiration";
+    }
+    if (daysUntilExpiry < 60) {
         return "Expiring Soon";
     }
+    // < 90 Days or Exactly 90 Days -> Valid (with 'Renew' UI handled front-end)
     return "Valid";
 };
 /**
- * Maps exact day milestones to notification types.
- * Only triggers on exactly 90, 30, and 0 days before expiry.
+ * Maps exact thresholds to column update keys
  */
-const milestoneForDay = (daysUntilExpiry) => {
-    if (daysUntilExpiry === 90) {
-        return "THREE_MONTHS";
+const getMilestoneUpdate = (daysUntilExpiry, doc) => {
+    if (daysUntilExpiry <= 0 && !doc.notified_0d) {
+        return { column: 'notified_0d', days: 0 };
     }
-    if (daysUntilExpiry === 30) {
-        return "ONE_MONTH";
+    if (daysUntilExpiry <= 30 && !doc.notified_1m) {
+        return { column: 'notified_1m', days: 30 };
     }
-    if (daysUntilExpiry === 0) {
-        return "EXACT_DAY";
+    if (daysUntilExpiry <= 60 && !doc.notified_2m) {
+        return { column: 'notified_2m', days: 60 };
+    }
+    if (daysUntilExpiry <= 90 && !doc.notified_3m) {
+        return { column: 'notified_3m', days: 90 };
     }
     return null;
 };
@@ -71,13 +109,13 @@ const fetchNotificationRecipients = async (instituteId) => {
         .from("users")
         .select("full_name, phone")
         .eq("institute_id", instituteId)
-        .in("role", ["Principal", "Admin"])
+        .in("role", ["Principal", "HOD", "Admin"])
         .returns();
     if (error) {
         logger_1.logger.error({ instituteId, error: error.message }, "Failed to fetch notification recipients");
         return [];
     }
-    return (data ?? []).filter((user) => !!user.phone);
+    return data ?? [];
 };
 /**
  * @security This function uses `supabaseAdmin` (service-role key) to bypass RLS.
@@ -94,7 +132,7 @@ const runDailyExpiryCheck = async () => {
     // ── Step 1: Fetch all documents expiring within 90 days ──
     const { data, error } = await supabase_1.supabaseAdmin
         .from("documents")
-        .select("id, institute_id, document_name, expiry_date, status")
+        .select("id, institute_id, document_name, expiry_date, status, notified_3m, notified_2m, notified_1m, notified_0d")
         .lte("expiry_date", ninetyDaysFromNow)
         .returns();
     if (error) {
@@ -128,8 +166,8 @@ const runDailyExpiryCheck = async () => {
             }
         }
         // ── Step 3: Check if this is a notification milestone day ──
-        const milestone = milestoneForDay(daysUntilExpiry);
-        if (!milestone) {
+        const milestoneParams = getMilestoneUpdate(daysUntilExpiry, doc);
+        if (!milestoneParams) {
             continue;
         }
         // Resolve institute name (with cache)
@@ -137,37 +175,32 @@ const runDailyExpiryCheck = async () => {
             const name = await fetchInstituteName(doc.institute_id);
             instituteNameCache.set(doc.institute_id, name);
         }
-        const instituteName = instituteNameCache.get(doc.institute_id) ?? "Unknown Institute";
-        // Fetch recipients (Principals + Institute Authorities with phone numbers)
-        const recipients = await fetchNotificationRecipients(doc.institute_id);
-        if (recipients.length === 0) {
-            logger_1.logger.warn({ documentId: doc.id, instituteId: doc.institute_id }, "No recipients with phone numbers found for milestone notification");
+        // Update the notification column
+        const { error: notifUpdateError } = await supabase_1.supabaseAdmin
+            .from("documents")
+            .update({ [milestoneParams.column]: true })
+            .eq("id", doc.id);
+        if (notifUpdateError) {
+            logger_1.logger.error({ error: notifUpdateError.message, docId: doc.id }, "Failed to update notification flags");
             continue;
         }
-        // ── Step 4: Queue one notification job per recipient ──
-        const todayIso = startOfUtcDay(now).toISOString().slice(0, 10);
-        for (const recipient of recipients) {
-            await queues_1.notificationQueue.add("document-expiry-notification", {
-                documentId: doc.id,
-                instituteId: doc.institute_id,
-                instituteName,
-                documentName: doc.document_name,
-                expiryDate: doc.expiry_date,
-                daysUntilExpiry,
-                milestone,
-                recipientName: recipient.full_name,
-                recipientPhone: recipient.phone
-            }, {
-                // Dedup key: one notification per doc + milestone + recipient + day
-                jobId: `${doc.id}:${milestone}:${recipient.phone}:${todayIso}`
-            });
-            notificationsQueued += 1;
-        }
+        // ── Step 4: Queue a single workflow notification per institute ──
+        // The workflow worker will resolve all HOD/Principals logic internally and batch emails
+        const { workflowNotificationQueue } = await Promise.resolve().then(() => __importStar(require("../queues")));
+        await workflowNotificationQueue.add("workflow-notification", {
+            event: "document_expiring",
+            documentId: doc.id,
+            documentName: doc.document_name,
+            instituteId: doc.institute_id,
+            actorName: "System",
+            actorRole: "System",
+            milestoneDays: milestoneParams.days
+        });
+        notificationsQueued += 1;
         logger_1.logger.info({
             documentId: doc.id,
-            milestone,
-            recipientCount: recipients.length
-        }, "Milestone notifications queued");
+            milestoneDays: milestoneParams.days,
+        }, "Document expiring workflow notification queued");
     }
     return {
         scanned: documents.length,

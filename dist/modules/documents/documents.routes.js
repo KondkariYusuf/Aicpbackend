@@ -9,3 +9,7 @@ const documents_controller_1 = require("./documents.controller");
 const router = (0, express_1.Router)();
 exports.documentsRoutes = router;
 router.post("/generate-upload-url", auth_1.authenticate, (0, rbac_1.authorizeRoles)("Clerk"), (0, async_handler_1.asyncHandler)(documents_controller_1.documentsController.generateUploadUrl));
+router.post("/confirm-upload", auth_1.authenticate, (0, rbac_1.authorizeRoles)("Clerk"), (0, async_handler_1.asyncHandler)(documents_controller_1.documentsController.confirmUpload));
+router.post("/generate-renewal-upload-url", auth_1.authenticate, (0, rbac_1.authorizeRoles)("Clerk"), (0, async_handler_1.asyncHandler)(documents_controller_1.documentsController.generateRenewalUploadUrl));
+router.post("/renewals/:id/review", auth_1.authenticate, (0, rbac_1.authorizeRoles)("HOD", "Principal", "Admin"), (0, async_handler_1.asyncHandler)(documents_controller_1.documentsController.reviewRenewal));
+router.delete("/:id", auth_1.authenticate, (0, rbac_1.authorizeRoles)("Clerk", "HOD", "Principal", "Admin"), (0, async_handler_1.asyncHandler)(documents_controller_1.documentsController.deleteDocument));
