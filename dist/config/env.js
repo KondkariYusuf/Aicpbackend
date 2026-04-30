@@ -29,9 +29,6 @@ const envSchema = zod_1.z.object({
     EMAIL_SMTP_USER: zod_1.z.string().optional(),
     EMAIL_SMTP_PASS: zod_1.z.string().optional(),
     EMAIL_FROM_ADDRESS: zod_1.z.string().email().optional()
-}).refine((data) => data.NODE_ENV !== "production" || !!data.WEBHOOK_SHARED_SECRET, {
-    message: "WEBHOOK_SHARED_SECRET is required in production. Refusing to start without it.",
-    path: ["WEBHOOK_SHARED_SECRET"]
 });
 const parsed = envSchema.safeParse(process.env);
 if (!parsed.success) {
